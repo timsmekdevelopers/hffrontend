@@ -6,6 +6,11 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   role: { type: String },
+  // Which Fellow Center organization this user belongs to.
+  // Null for global/unaffiliated users (Super Admin, standalone members).
+  // Set during registration when the user arrives via a custom domain or
+  // selects their organization during sign-up.
+  organization_id: { type: String, default: null, index: true },
   state: { type: String },
   branch: { type: String },
   country: { type: String },
@@ -21,6 +26,12 @@ const userSchema = new mongoose.Schema({
   localePreference: { type: String, default: 'en-US' },
   securityQuestion: { type: String },
   securityAnswer: { type: String },
+  mustResetPassword: { type: Boolean, default: false },
+  emailVerificationRequired: { type: Boolean, default: false },
+  emailVerified: { type: Boolean, default: false },
+  emailVerificationToken: { type: String },
+  emailVerificationTokenExpiresAt: { type: Date },
+  emailVerifiedAt: { type: Date },
   attendanceCredits: { type: Number, default: 0 },
   attendanceHistory: [
     {
