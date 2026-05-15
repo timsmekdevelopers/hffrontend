@@ -7,6 +7,7 @@ const FellowCenterSetupRequest = require('../models/FellowCenterSetupRequest');
 const Organization = require('../models/Organization');
 const { evictOrgConnection } = require('../orgDb');
 const { validateUri, migrateOrgDb } = require('../orgMigration');
+const { sendOCFCodeEmail } = require('../emailService');
 
 // ─── Domain verification helpers ─────────────────────────────────────────────
 
@@ -133,7 +134,21 @@ router.post('/setup-requests/:id/approve', async (req, res) => {
       return res.status(400).json({ msg: 'Request has already been reviewed.' });
     }
 
-    const organization_id = crypto.randomUUID();
+
+    // Generate a unique 5-character alphanumeric OCF code (A-Z, 0-9)
+    async function generateUniqueOCFCode() {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      let code;
+      let exists = true;
+      while (exists) {
+        code = Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+        // Check case-insensitively
+        exists = await Organization.exists({ organization_id: new RegExp('^' + code + '$', 'i') });
+      }
+      return code;
+    }
+
+    const organization_id = await generateUniqueOCFCode();
     const org = new Organization({
       organization_id,
       name: request.churchName,
@@ -160,6 +175,18 @@ router.post('/setup-requests/:id/approve', async (req, res) => {
     request.reviewNote = reviewNote || '';
     request.organizationId = org._id;
     await request.save();
+
+    // Send OCF Code via email
+    try {
+      await sendOCFCodeEmail({
+        email: request.email,
+        organizationName: request.churchName,
+        ocfCode: organization_id
+      });
+    } catch (emailErr) {
+      console.error('Failed to send OCF code email:', emailErr.message);
+      // Don't fail the approval if email fails, just log it
+    }
 
     res.json({ msg: 'Setup request approved. Organization created.', organization: org, request });
   } catch (err) {
@@ -222,6 +249,32 @@ router.get('/by-domain', async (req, res) => {
   }
 });
 
+// ─── GET /api/organizations/by-ocf-code ──────────────────────────────────
+// Public — look up an active org by its 5-character OCF code (case-insensitive).
+// Used by the frontend landing page to load org branding from the OCF code.
+router.get('/by-ocf-code', async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!code) return res.status(400).json({ msg: 'code query param required.' });
+
+    // Sanitize: OCF codes are strictly alphanumeric (A-Z, 0-9), max 5 chars
+    const sanitized = String(code).trim().toUpperCase();
+    if (!/^[A-Z0-9]{1,5}$/.test(sanitized)) {
+      return res.status(400).json({ msg: 'Invalid OCF Code format.' });
+    }
+
+    const org = await Organization.findOne(
+      { organization_id: new RegExp('^' + sanitized + '$', 'i'), status: 'active' },
+      'name logo address enquiryPhone themeKey organization_id'
+    );
+
+    if (!org) return res.status(404).json({ msg: 'No organization found with that OCF Code.' });
+    res.json(org);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+});
+
 // ─── GET /api/organizations/mine ─────────────────────────────────────────
 // Admin — fetch their own organization by email.
 router.get('/mine', async (req, res) => {
@@ -244,7 +297,7 @@ router.get('/mine', async (req, res) => {
 //       is silently ignored if an existing URI is already active.
 router.put('/:id/settings', async (req, res) => {
   try {
-    const { dedicatedDatabaseUri, customDomain, themeKey, logo, navbarItems, footerLinks } = req.body;
+    const { dedicatedDatabaseUri, customDomain, themeKey, logo, navbarItems, footerLinks, centerCustomName } = req.body;
     const org = await Organization.findById(req.params.id);
     if (!org) return res.status(404).json({ msg: 'Organization not found.' });
 
@@ -280,6 +333,9 @@ router.put('/:id/settings', async (req, res) => {
     }
     if (themeKey !== undefined) org.themeKey = themeKey;
     if (logo !== undefined) org.logo = logo;
+    if (centerCustomName !== undefined) {
+      org.centerCustomName = String(centerCustomName || '').trim().slice(0, 80) || 'Our Church Fellowship';
+    }
     if (Array.isArray(navbarItems)) {
       org.navbarItems = navbarItems.map(item => ({
         label: String(item.label || '').trim().slice(0, 80),
